@@ -45,9 +45,14 @@ class ModelArgs(BaseModelArgs):
     top_k_experts: Optional[int] = None
     moe_intermediate_size: Optional[int] = None
     layer_types: Optional[List[str]] = None
+    per_layer_config: Optional[Dict] = None
     tie_word_embeddings: bool = True
 
     def __post_init__(self):
+        self.per_layer_config = {
+            int(layer): overrides
+            for layer, overrides in (self.per_layer_config or {}).items()
+        }
         if self.rope_parameters is None:
             self.rope_parameters = {
                 "full_attention": {
@@ -184,12 +189,14 @@ class Attention(nn.Module):
         self.is_sliding = self.layer_type == "sliding_attention"
         self.has_kv = layer_idx < config.num_hidden_layers - config.num_kv_shared_layers
 
-        self.head_dim = (
-            config.global_head_dim
-            if self.layer_type == "full_attention"
-            and hasattr(config, "global_head_dim")
-            and config.global_head_dim
-            else config.head_dim
+        layer_config = config.per_layer_config.get(layer_idx, {})
+        self.head_dim = layer_config.get(
+            "head_dim",
+            (
+                config.global_head_dim
+                if self.layer_type == "full_attention" and config.global_head_dim
+                else config.head_dim
+            ),
         )
 
         dim = config.hidden_size
@@ -201,6 +208,7 @@ class Attention(nn.Module):
             self.n_kv_heads = config.num_global_key_value_heads
         else:
             self.n_kv_heads = config.num_key_value_heads
+        self.n_kv_heads = layer_config.get("num_key_value_heads", self.n_kv_heads)
 
         self.scale = 1.0
 

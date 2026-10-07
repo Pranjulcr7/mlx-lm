@@ -2356,6 +2356,86 @@ class TestModels(unittest.TestCase):
             model, args.model_type, args.vocab_size, args.num_hidden_layers
         )
 
+    def test_gemma4_resaved_attention_config_loads_weights(self):
+        from mlx_lm.models import gemma4, gemma4_text
+
+        config = dict(
+            hidden_size=32,
+            intermediate_size=64,
+            num_hidden_layers=2,
+            num_attention_heads=4,
+            num_key_value_heads=4,
+            head_dim=8,
+            global_head_dim=16,
+            num_global_key_value_heads=2,
+            num_kv_shared_layers=0,
+            hidden_size_per_layer_input=0,
+            vocab_size=32,
+            layer_types=["sliding_attention", "full_attention"],
+        )
+        tokens = mx.array([[1, 2, 3]])
+        for wrapped in [False, True]:
+            for k_eq_v in [False, True]:
+                with self.subTest(wrapped=wrapped, k_eq_v=k_eq_v):
+                    original = dict(config, attention_k_eq_v=k_eq_v)
+                    resaved = original.copy()
+                    # Transformers serializes the global attention dimensions as
+                    # layer overrides instead of retaining the legacy fields.
+                    overrides = {"head_dim": resaved.pop("global_head_dim")}
+                    global_kv_heads = resaved.pop("num_global_key_value_heads")
+                    if k_eq_v:
+                        overrides["num_key_value_heads"] = global_kv_heads
+                    resaved["per_layer_config"] = {"1": overrides}
+
+                    def make_model(config):
+                        if wrapped:
+                            return gemma4.Model(
+                                gemma4.ModelArgs(
+                                    text_config=config.copy(), vocab_size=32
+                                )
+                            )
+                        return gemma4_text.Model(
+                            gemma4_text.ModelArgs.from_dict(config)
+                        )
+
+                    reference = make_model(original)
+                    model = make_model(resaved)
+                    model.load_weights(tree_flatten(reference.parameters()))
+                    self.assertTrue(mx.allclose(model(tokens), reference(tokens)))
+
+                    caches = [model.make_cache(), reference.make_cache()]
+                    for chunk in [tokens[:, :2], tokens[:, 2:]]:
+                        actual = model(chunk, cache=caches[0])
+                        expected = reference(chunk, cache=caches[1])
+                        self.assertTrue(mx.allclose(actual, expected))
+
+    def test_gemma4_per_layer_attention_overrides(self):
+        from mlx_lm.models import gemma4_text
+
+        for key_type in [str, int]:
+            with self.subTest(key_type=key_type):
+                args = gemma4_text.ModelArgs(
+                    hidden_size=32,
+                    num_hidden_layers=3,
+                    num_kv_shared_layers=0,
+                    num_attention_heads=4,
+                    num_key_value_heads=4,
+                    num_global_key_value_heads=2,
+                    head_dim=8,
+                    global_head_dim=16,
+                    attention_k_eq_v=True,
+                    layer_types=["full_attention"] * 3,
+                    per_layer_config={
+                        key_type(0): {"head_dim": 8, "num_key_value_heads": 1},
+                        key_type(1): {"num_key_value_heads": 4},
+                    },
+                )
+                for layer, expected in enumerate([(8, 1), (16, 4), (16, 2)]):
+                    attention = gemma4_text.Attention(args, layer)
+                    self.assertEqual(
+                        (attention.head_dim, attention.n_kv_heads), expected
+                    )
+
     def test_gemma4_quantized_embedding_preserves_lookup_scale(self):
         from mlx_lm.models import gemma4_text
 
